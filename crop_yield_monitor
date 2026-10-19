@@ -1,0 +1,761 @@
+"""
+===============================================================
+ CROP YIELD MONITORING SYSTEM
+ PROG211 Object-Oriented Programming 1 - Individual Assignment
+ Real-World Solutions under DPG Standards | Domain: Agriculture
+===============================================================
+
+Run the interactive menu:   python crop_yield_monitor.py
+Run the automatic demo:     python crop_yield_monitor.py --demo
+Run the built-in tests:     python crop_yield_monitor.py --test
+
+The whole program is in this ONE file, organised into sections:
+
+    SECTION 1 - Fixed data (tuples)
+    SECTION 2 - Classes: Crop, Farmer, HarvestRecord
+    SECTION 3 - Record functions (the dictionary data structure)
+    SECTION 4 - Sample data
+    SECTION 5 - Input helpers
+    SECTION 6 - Menu actions
+    SECTION 7 - Menu and demo
+    SECTION 8 - Unit tests
+
+PRIVACY (DPG): a Farmer is stored only as a farmer code, a FIRST name
+and a district. No surname, phone number, home address, GPS location,
+national ID number, income or bank details are collected or stored.
+
+NOTE: the expected yields below are simplified example figures for
+this assignment. They are not official agricultural advice.
+"""
+
+import sys
+import unittest
+from datetime import date
+
+
+# ===============================================================
+# SECTION 1 - FIXED DATA (TUPLES)
+# Tuples are used because these values must NEVER change while the
+# program runs. A tuple is immutable, so nothing can edit them by mistake.
+# ===============================================================
+
+# Each inner tuple is: (crop code, crop name, expected yield in tonnes per hectare)
+CROP_CATALOGUE = (
+    ("RICE",  "Rice",         2.5),
+    ("CASS",  "Cassava",     10.0),
+    ("MAIZE", "Maize",        2.0),
+    ("GNUT",  "Groundnut",    1.2),
+    ("SWPOT", "Sweet Potato", 6.0),
+)
+
+# Growing seasons
+SEASONS = ("Rainy", "Dry")
+
+# Yield rating bands: (minimum share of the expected yield, rating)
+# e.g. 1.2 means "at least 120% of the expected yield"
+YIELD_RATINGS = (
+    (1.2, "Excellent"),
+    (1.0, "Good"),
+    (0.7, "Fair"),
+    (0.0, "Poor"),
+)
+
+AREA_LIMITS = (0.1, 100.0)   # (smallest, largest) field size in hectares
+
+
+def get_rating(ratio):
+    """Return the rating word for a yield ratio, using the YIELD_RATINGS tuple."""
+    for minimum, rating in YIELD_RATINGS:   # tuple unpacking
+        if ratio >= minimum:
+            return rating
+    return "Poor"
+
+
+# ===============================================================
+# SECTION 2 - CLASSES
+# ===============================================================
+
+class Crop:
+    """A type of crop and the yield a farmer can normally expect."""
+
+    total_crops = 0   # class attribute shared by every Crop object
+
+    def __init__(self, code, name, expected_yield):
+        if expected_yield <= 0:
+            raise ValueError("Expected yield must be more than 0 tonnes per hectare.")
+        self.code = code.upper()
+        self.name = name
+        self.expected_yield = expected_yield     # tonnes per hectare
+        Crop.total_crops += 1
+
+    # ---------- Instance methods ----------
+    def display_info(self):
+        print(f"  {self.code:<7}{self.name:<15}expected {self.expected_yield:>5.1f} t/ha")
+
+    def get_statistics(self, records):
+        """
+        Work out statistics for this crop from the records dictionary.
+        Returns a TUPLE: (number of harvests, total kg, average t/ha, best record)
+        """
+        count = 0
+        total_kg = 0
+        total_yield = 0
+        best = None
+        for record in records.values():
+            if record.crop is not self:
+                continue
+            count += 1
+            total_kg += record.quantity_kg
+            total_yield += record.yield_per_hectare()
+            if best is None or record.yield_per_hectare() > best.yield_per_hectare():
+                best = record
+        average = round(total_yield / count, 2) if count else 0.0
+        return count, total_kg, average, best
+
+    # ---------- Class methods ----------
+    @classmethod
+    def from_catalogue(cls, entry):
+        """Create a Crop from one tuple in CROP_CATALOGUE."""
+        code, name, expected = entry   # tuple unpacking
+        return cls(code, name, expected)
+
+    @classmethod
+    def get_total_crops(cls):
+        return cls.total_crops
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+
+class Farmer:
+    """A farmer whose harvests are monitored (minimal personal data)."""
+
+    total_farmers = 0   # class attribute: how many farmers currently exist
+
+    def __init__(self, farmer_id, first_name, district):
+        if not first_name.strip() or not district.strip():
+            raise ValueError("First name and district cannot be empty.")
+        self.farmer_id = farmer_id.upper()
+        self.first_name = first_name.strip()
+        self.district = district.strip()
+        # Dictionary of this farmer's harvests: {record_id: HarvestRecord}
+        self.harvests = {}
+        Farmer.total_farmers += 1
+
+    # ---------- Instance methods ----------
+    def add_harvest(self, record):
+        """Attach a HarvestRecord object to this farmer."""
+        self.harvests[record.record_id] = record
+
+    def total_harvest_kg(self):
+        total = 0
+        for record in self.harvests.values():
+            total += record.quantity_kg
+        return total
+
+    def average_performance(self):
+        """Average yield as a percentage of the expected yield (100 = on target)."""
+        if not self.harvests:
+            return 0
+        total = 0
+        for record in self.harvests.values():
+            total += record.performance_ratio()
+        return round(total / len(self.harvests) * 100)
+
+    def display_info(self):
+        print(f"  Farmer ID  : {self.farmer_id}")
+        print(f"  First name : {self.first_name}")
+        print(f"  District   : {self.district}")
+        print(f"  Harvests   : {len(self.harvests)} recorded")
+
+    def display_farm_report(self):
+        """Print a full farm report for this farmer."""
+        print("=" * 66)
+        print("                         FARM YIELD REPORT")
+        print("=" * 66)
+        self.display_info()
+        print("-" * 66)
+        print(f"  {'ID':<6}{'Crop':<14}{'Season':<12}{'Area':>6}{'Kg':>8}{'t/ha':>7}  Rating")
+        print("-" * 66)
+        for record in self.harvests.values():
+            season = f"{record.season} {record.year}"
+            print(f"  {record.record_id:<6}{record.crop.name:<14}{season:<12}"
+                  f"{record.area_ha:>6.1f}{record.quantity_kg:>8}"
+                  f"{record.yield_per_hectare():>7.2f}  {record.rating()}")
+        print("-" * 66)
+        print(f"  Total harvested     : {self.total_harvest_kg()} kg")
+        print(f"  Average performance : {self.average_performance()}% of expected yield")
+        print("=" * 66)
+
+    # ---------- Class methods ----------
+    @classmethod
+    def from_string(cls, text):
+        """Create a Farmer from text like 'F003, Fatmata, Bombali'."""
+        farmer_id, first_name, district = (part.strip() for part in text.split(","))
+        return cls(farmer_id, first_name, district)
+
+    @classmethod
+    def get_total_farmers(cls):
+        return cls.total_farmers
+
+    @classmethod
+    def record_removal(cls):
+        """Reduce the count when a farmer is deleted."""
+        cls.total_farmers -= 1
+
+    # ---------- Static method ----------
+    @staticmethod
+    def find_top_farmer(farmers):
+        """Return the farmer with the highest average performance (or None)."""
+        top = None
+        for farmer in farmers.values():
+            if not farmer.harvests:
+                continue
+            if top is None or farmer.average_performance() > top.average_performance():
+                top = farmer
+        return top
+
+
+class HarvestRecord:
+    """One harvest of one crop from one farmer's field in one season."""
+
+    total_records = 0   # how many records currently exist
+    next_number = 1     # gives every record a unique ID (never reused)
+
+    def __init__(self, farmer, crop, year, season, area_ha, quantity_kg):
+        if not HarvestRecord.is_valid_year(year):
+            raise ValueError(f"Year must be from 2000 to {date.today().year}.")
+        if not HarvestRecord.is_valid_season(season):
+            raise ValueError("Season must be one of: " + ", ".join(SEASONS))
+        if not HarvestRecord.is_valid_area(area_ha):
+            low, high = AREA_LIMITS
+            raise ValueError(f"Field area must be from {low} to {high} hectares.")
+        if quantity_kg < 0:
+            raise ValueError("Harvest quantity cannot be negative.")
+        self.record_id = f"H{HarvestRecord.next_number:03d}"
+        HarvestRecord.next_number += 1
+        HarvestRecord.total_records += 1
+        self.farmer = farmer          # a Farmer OBJECT, not just an ID
+        self.crop = crop              # a Crop OBJECT
+        self.year = year
+        self.season = season.capitalize()
+        self.area_ha = area_ha
+        self.quantity_kg = quantity_kg
+        # Objects interacting: the record registers itself with the farmer
+        farmer.add_harvest(self)
+
+    # ---------- Instance methods ----------
+    def yield_per_hectare(self):
+        """Yield in tonnes per hectare (1 tonne = 1000 kg)."""
+        return round(self.quantity_kg / 1000 / self.area_ha, 2)
+
+    def performance_ratio(self):
+        """How this yield compares with the crop's expected yield (1.0 = on target)."""
+        return self.yield_per_hectare() / self.crop.expected_yield
+
+    def rating(self):
+        return get_rating(self.performance_ratio())
+
+    def update_quantity(self, new_kg):
+        """Correct the harvested quantity (e.g. after re-weighing)."""
+        if new_kg < 0:
+            raise ValueError("Harvest quantity cannot be negative.")
+        old_kg, old_rating = self.quantity_kg, self.rating()
+        self.quantity_kg = new_kg
+        print(f"  Updated {self.record_id}: {old_kg} kg ({old_rating}) -> "
+              f"{new_kg} kg ({self.rating()})")
+
+    def display_info(self):
+        season = f"{self.season} {self.year}"
+        print(f"  {self.record_id:<6}{self.farmer.farmer_id:<6}{self.farmer.first_name:<10}"
+              f"{self.crop.code:<7}{season:<12}{self.area_ha:>5.1f}{self.quantity_kg:>8}"
+              f"{self.yield_per_hectare():>7.2f}  {self.rating()}")
+
+    # ---------- Class methods ----------
+    @classmethod
+    def from_record(cls, text, farmers, crops):
+        """Create a record from text like 'F001, RICE, 2025, Rainy, 2.0, 5600'."""
+        farmer_id, code, year, season, area, kg = (part.strip() for part in text.split(","))
+        farmer = farmers.get(farmer_id.upper())
+        crop = crops.get(code.upper())
+        if farmer is None:
+            raise ValueError(f"No farmer with ID '{farmer_id}'.")
+        if crop is None:
+            raise ValueError(f"No crop with code '{code}'.")
+        return cls(farmer, crop, int(year), season, float(area), int(kg))
+
+    @classmethod
+    def get_total_records(cls):
+        return cls.total_records
+
+    @classmethod
+    def record_removal(cls, count=1):
+        cls.total_records -= count
+
+    # ---------- Static methods ----------
+    @staticmethod
+    def is_valid_area(area_ha):
+        low, high = AREA_LIMITS
+        return low <= area_ha <= high
+
+    @staticmethod
+    def is_valid_season(season):
+        return season.capitalize() in SEASONS
+
+    @staticmethod
+    def is_valid_year(year):
+        return 2000 <= year <= date.today().year
+
+
+# ===============================================================
+# SECTION 3 - RECORD FUNCTIONS (DICTIONARIES)
+# A DICTIONARY is the one data structure used to store multiple
+# objects, with the unique ID as the key:
+#     farmers = {"F001": <Farmer>, ...}
+#     crops   = {"RICE": <Crop>, ...}
+#     records = {"H001": <HarvestRecord>, ...}
+# Each Farmer also keeps its harvests in a dictionary.
+# ===============================================================
+
+def add_record(records, key, item):
+    """Add an object to a dictionary (rejects duplicate IDs)."""
+    if key in records:
+        raise ValueError(f"ID {key} already exists.")
+    records[key] = item
+    return item
+
+
+def find_record(records, key, label="record"):
+    """Look up an object by its ID, with a friendly error if missing."""
+    key = key.strip().upper()
+    if key not in records:
+        raise ValueError(f"No {label} found with ID '{key}'.")
+    return records[key]
+
+
+def delete_farmer(farmers, records, farmer_id):
+    """Remove a farmer AND all of their harvest records. Returns the removed farmer."""
+    farmer = find_record(farmers, farmer_id, "farmer")
+    for record_id in farmer.harvests:
+        del records[record_id]
+    HarvestRecord.record_removal(len(farmer.harvests))
+    del farmers[farmer.farmer_id]
+    Farmer.record_removal()
+    return farmer
+
+
+def search_farmers(farmers, text):
+    """Print farmers whose first name or district contains the text. Returns the count."""
+    text = text.lower()
+    found = 0
+    for farmer in farmers.values():
+        if text in farmer.first_name.lower() or text in farmer.district.lower():
+            print(f"  {farmer.farmer_id:<7}{farmer.first_name:<12}{farmer.district}")
+            found += 1
+    return found
+
+
+def display_farmers(farmers):
+    print(f"\n  ALL FARMERS ({len(farmers)})")
+    print("  " + "-" * 60)
+    print(f"  {'ID':<7}{'Name':<12}{'District':<14}{'Harvests':>9}{'Total kg':>10}{'Perf.':>7}")
+    print("  " + "-" * 60)
+    for farmer in farmers.values():
+        print(f"  {farmer.farmer_id:<7}{farmer.first_name:<12}{farmer.district:<14}"
+              f"{len(farmer.harvests):>9}{farmer.total_harvest_kg():>10}"
+              f"{farmer.average_performance():>6}%")
+
+
+def display_crops(crops):
+    print(f"\n  CROP CATALOGUE ({len(crops)} crops)")
+    print("  " + "-" * 60)
+    for crop in crops.values():
+        crop.display_info()
+
+
+def display_records(records):
+    print(f"\n  ALL HARVEST RECORDS ({len(records)})")
+    print("  " + "-" * 66)
+    print(f"  {'ID':<6}{'Farm':<6}{'Name':<10}{'Crop':<7}{'Season':<12}{'Ha':>5}"
+          f"{'Kg':>8}{'t/ha':>7}  Rating")
+    print("  " + "-" * 66)
+    for record in records.values():
+        record.display_info()
+
+
+# ===============================================================
+# SECTION 4 - SAMPLE DATA (fictional farmers - no real people)
+# ===============================================================
+
+def load_sample_data():
+    crops = {}
+    for entry in CROP_CATALOGUE:
+        crop = Crop.from_catalogue(entry)            # class method
+        add_record(crops, crop.code, crop)
+
+    farmers = {}
+    for farmer in (Farmer("F001", "Aminata", "Bo"),
+                   Farmer("F002", "Mohamed", "Kenema"),
+                   Farmer.from_string("F003, Fatmata, Bombali"),   # class method
+                   Farmer("F004", "Ibrahim", "Port Loko")):
+        add_record(farmers, farmer.farmer_id, farmer)
+
+    records = {}
+    sample_records = (
+        "F001, RICE, 2025, Rainy, 2.0, 5600",
+        "F001, GNUT, 2025, Dry, 1.0, 1300",
+        "F001, CASS, 2026, Rainy, 1.5, 16500",
+        "F002, RICE, 2025, Rainy, 3.0, 4500",
+        "F002, MAIZE, 2026, Rainy, 1.0, 1700",
+        "F003, CASS, 2025, Rainy, 2.0, 25000",
+        "F003, SWPOT, 2026, Dry, 0.5, 3300",
+        "F004, MAIZE, 2025, Rainy, 2.0, 2100",
+        "F004, RICE, 2026, Rainy, 1.0, 1400",
+    )
+    for line in sample_records:
+        record = HarvestRecord.from_record(line, farmers, crops)   # class method
+        add_record(records, record.record_id, record)
+    return crops, farmers, records
+
+
+# ===============================================================
+# SECTION 5 - INPUT HELPERS
+# ===============================================================
+
+def ask(prompt):
+    return input(prompt).strip()
+
+
+def ask_valid(prompt, convert, check, problem):
+    """Keep asking until the answer can be converted AND passes the check."""
+    while True:
+        text = ask(prompt)
+        try:
+            value = convert(text)
+        except ValueError:
+            value = None
+        if value is not None and check(value):
+            return value
+        print(f"  Problem: {problem}")
+
+
+def ask_kg(prompt):
+    return ask_valid(prompt, int, lambda kg: kg >= 0,
+                     "please type a whole number of kg that is 0 or more, like 3000.")
+
+
+# ===============================================================
+# SECTION 6 - MENU ACTIONS
+# ===============================================================
+
+def record_harvest(farmers, crops, records):
+    farmer = find_record(farmers, ask("  Farmer ID (e.g. F002): "), "farmer")
+    print("  Crops: " + ", ".join(f"{code} = {name}" for code, name, _ in CROP_CATALOGUE))
+    crop = find_record(crops, ask("  Crop code: "), "crop")
+    low, high = AREA_LIMITS
+    year = ask_valid("  Harvest year (e.g. 2026): ", int, HarvestRecord.is_valid_year,
+                     f"please type a year from 2000 to {date.today().year}.")
+    season = ask_valid(f"  Season ({' or '.join(SEASONS)}): ", str, HarvestRecord.is_valid_season,
+                       "please type " + " or ".join(SEASONS) + ".")
+    area = ask_valid("  Field area in hectares (e.g. 1.5): ", float, HarvestRecord.is_valid_area,
+                     f"please type a number from {low} to {high}, like 1.5.")
+    kg = ask_kg("  Quantity harvested in kg (e.g. 3000): ")
+    record = HarvestRecord(farmer, crop, year, season, area, kg)
+    add_record(records, record.record_id, record)
+    print(f"  [OK] Saved {record.record_id}: {farmer.first_name}, {crop.name}, "
+          f"{record.yield_per_hectare()} t/ha - {record.rating()}")
+
+
+def correct_quantity(records):
+    record = find_record(records, ask("  Harvest record ID (e.g. H005): "), "harvest record")
+    record.display_info()
+    record.update_quantity(ask_kg("  Correct quantity in kg: "))
+
+
+def show_farm_report(farmers):
+    farmer = find_record(farmers, ask("  Farmer ID (e.g. F001): "), "farmer")
+    print()
+    farmer.display_farm_report()
+
+
+def register_farmer(farmers):
+    farmer_id = ask("  New farmer ID (e.g. F005): ").upper()
+    if not farmer_id:
+        raise ValueError("Farmer ID cannot be empty.")
+    if farmer_id in farmers:
+        raise ValueError(f"ID {farmer_id} already exists.")
+    farmer = Farmer(farmer_id, ask("  First name only: "), ask("  District: "))
+    add_record(farmers, farmer.farmer_id, farmer)
+    print(f"  [OK] Farmer {farmer.farmer_id} registered.")
+
+
+def remove_farmer(farmers, records):
+    farmer = find_record(farmers, ask("  Farmer ID to delete: "), "farmer")
+    farmer.display_info()
+    if ask("  Type YES to delete this farmer and all their harvests: ").upper() != "YES":
+        print("  Cancelled - nothing was deleted.")
+        return
+    count = len(farmer.harvests)
+    delete_farmer(farmers, records, farmer.farmer_id)
+    print(f"  [OK] Deleted {farmer.first_name} ({farmer.farmer_id}) and {count} harvest record(s).")
+
+
+def search_farmer(farmers):
+    text = ask("  Type part of a first name or district: ")
+    if not text:
+        raise ValueError("Please type at least one letter.")
+    print(f"\n  SEARCH RESULTS FOR '{text}'")
+    print("  " + "-" * 40)
+    if search_farmers(farmers, text) == 0:
+        print("  No farmers matched your search.")
+
+
+def show_top_farmer(farmers):
+    top = Farmer.find_top_farmer(farmers)      # static method
+    print("\n  TOP-PERFORMING FARMER (highest average performance)")
+    print("  " + "-" * 52)
+    if top is None:
+        print("  No harvests have been recorded yet.")
+        return
+    print(f"  {top.first_name} ({top.farmer_id}), {top.district} district")
+    print(f"  Harvests recorded   : {len(top.harvests)}")
+    print(f"  Total harvested     : {top.total_harvest_kg()} kg")
+    print(f"  Average performance : {top.average_performance()}% of expected yield")
+
+
+def show_crop_statistics(crops, records):
+    print("\n  CROP STATISTICS")
+    for crop in crops.values():
+        count, total_kg, average, best = crop.get_statistics(records)   # tuple unpacking
+        print("  " + "-" * 60)
+        print(f"  {crop.name} (expected {crop.expected_yield} t/ha)")
+        if count == 0:
+            print("    No harvests recorded yet.")
+            continue
+        print(f"    Harvests: {count}   Total: {total_kg} kg   Average: {average} t/ha")
+        print(f"    Best    : {best.yield_per_hectare()} t/ha by {best.farmer.first_name} "
+              f"({best.farmer.district}, {best.season} {best.year})")
+    print("  " + "-" * 60)
+
+
+def show_low_yield_alerts(records):
+    """Harvests rated Poor - these farms may need a visit from an extension officer."""
+    print("\n  LOW-YIELD ALERTS (rated Poor - below 70% of expected)")
+    print("  " + "-" * 60)
+    found = 0
+    for record in records.values():
+        if record.rating() == "Poor":
+            found += 1
+            print(f"  {record.record_id}  {record.farmer.first_name} ({record.farmer.district}): "
+                  f"{record.crop.name} {record.yield_per_hectare()} t/ha, "
+                  f"{round(record.performance_ratio() * 100)}% of expected")
+    if found == 0:
+        print("  No low-yield harvests. Well done!")
+    else:
+        print(f"  {found} harvest(s) need follow-up by an extension officer.")
+
+
+def show_summary(farmers, crops, records):
+    total_kg = 0
+    for record in records.values():
+        total_kg += record.quantity_kg
+    print("\n  SYSTEM SUMMARY")
+    print("  " + "-" * 40)
+    print(f"  Farmers registered : {Farmer.get_total_farmers()}")
+    print(f"  Crops in catalogue : {Crop.get_total_crops()}")
+    print(f"  Harvest records    : {HarvestRecord.get_total_records()}")
+    print(f"  Total harvested    : {total_kg} kg ({total_kg / 1000:.2f} tonnes)")
+    print("\n  YIELD RATINGS (fixed tuple)")
+    for minimum, rating in YIELD_RATINGS:
+        if minimum > 0:
+            print(f"    {rating:<10} at least {round(minimum * 100):>3}% of expected yield")
+        else:
+            print(f"    {rating:<10} below the bands above")
+
+
+# ===============================================================
+# SECTION 7 - MENU AND DEMO
+# ===============================================================
+
+MENU = (
+    "View all farmers",
+    "View crop catalogue",
+    "View all harvest records",
+    "Record a new harvest",
+    "Correct a harvest quantity",
+    "Print a farm report",
+    "Register a new farmer",
+    "Delete a farmer",
+    "Search farmers by name or district",
+    "Show the top-performing farmer",
+    "Show crop statistics",
+    "Show low-yield alerts",
+    "System summary",
+)
+
+
+def main():
+    crops, farmers, records = load_sample_data()
+    actions = {
+        "1": lambda: display_farmers(farmers),
+        "2": lambda: display_crops(crops),
+        "3": lambda: display_records(records),
+        "4": lambda: record_harvest(farmers, crops, records),
+        "5": lambda: correct_quantity(records),
+        "6": lambda: show_farm_report(farmers),
+        "7": lambda: register_farmer(farmers),
+        "8": lambda: remove_farmer(farmers, records),
+        "9": lambda: search_farmer(farmers),
+        "10": lambda: show_top_farmer(farmers),
+        "11": lambda: show_crop_statistics(crops, records),
+        "12": lambda: show_low_yield_alerts(records),
+        "13": lambda: show_summary(farmers, crops, records),
+    }
+    print("=== Crop Yield Monitoring System (no sensitive personal data stored) ===")
+    while True:
+        print("\n  MENU")
+        number = 0
+        for label in MENU:
+            number += 1
+            print(f"  {number:>2}. {label}")
+        print("   0. Exit")
+        choice = ask("  Choose an option: ")
+        if choice == "0":
+            print("  Goodbye!")
+            break
+        if choice not in actions:
+            print("  Problem: please enter one of the numbers shown.")
+            continue
+        try:
+            actions[choice]()
+        except ValueError as error:
+            print(f"  Problem: {error}")
+
+
+def heading(text):
+    print(f"\n=== {text} ===")
+
+
+def run_demo():
+    heading("1. Creating objects (Task 1)")
+    crops, farmers, records = load_sample_data()
+    farmers["F002"].display_info()
+
+    heading("2. Records stored in dictionaries (Task 2)")
+    display_farmers(farmers)
+    display_crops(crops)
+
+    heading("3. Instance method: update_quantity() after re-weighing")
+    records["H004"].update_quantity(6900)
+
+    heading("4. Class method: HarvestRecord.from_record()")
+    new = HarvestRecord.from_record("F002, GNUT, 2026, Dry, 1.0, 1250", farmers, crops)
+    add_record(records, new.record_id, new)
+    new.display_info()
+
+    heading("5. Static methods and validation")
+    print(f"  HarvestRecord.is_valid_area(1.5)      -> {HarvestRecord.is_valid_area(1.5)}")
+    print(f"  HarvestRecord.is_valid_area(500)      -> {HarvestRecord.is_valid_area(500)}")
+    print(f"  HarvestRecord.is_valid_season('dry')  -> {HarvestRecord.is_valid_season('dry')}")
+    print(f"  HarvestRecord.is_valid_season('Winter') -> {HarvestRecord.is_valid_season('Winter')}")
+    try:
+        HarvestRecord(farmers["F001"], crops["RICE"], 2026, "Rainy", 0, 500)
+    except ValueError as error:
+        print(f"  Problem: {error}")
+
+    heading("6. Objects interacting: farm report")
+    farmers["F001"].display_farm_report()
+
+    heading("7. Top farmer, crop statistics and low-yield alerts")
+    show_top_farmer(farmers)
+    show_crop_statistics(crops, records)
+    show_low_yield_alerts(records)
+
+    heading("8. Deleting a farmer")
+    removed = delete_farmer(farmers, records, "F004")
+    print(f"  [OK] Deleted {removed.first_name} ({removed.farmer_id}).")
+    show_summary(farmers, crops, records)
+
+
+# ===============================================================
+# SECTION 8 - UNIT TESTS  (python crop_yield_monitor.py --test)
+# ===============================================================
+
+class TestCropYield(unittest.TestCase):
+    def setUp(self):
+        self.rice = Crop("RICE", "Rice", 2.5)
+        self.farmer = Farmer("T001", "Adama", "Bo")
+
+    def test_yield_and_rating(self):
+        record = HarvestRecord(self.farmer, self.rice, 2025, "Rainy", 2.0, 5000)
+        self.assertEqual(record.yield_per_hectare(), 2.5)
+        self.assertEqual(record.rating(), "Good")
+
+    def test_ratings_from_tuple(self):
+        self.assertEqual(get_rating(1.3), "Excellent")
+        self.assertEqual(get_rating(0.8), "Fair")
+        self.assertEqual(get_rating(0.2), "Poor")
+
+    def test_invalid_input_rejected(self):
+        with self.assertRaises(ValueError):
+            HarvestRecord(self.farmer, self.rice, 2025, "Winter", 1.0, 100)
+        with self.assertRaises(ValueError):
+            HarvestRecord(self.farmer, self.rice, 2025, "Dry", 0, 100)
+        with self.assertRaises(ValueError):
+            HarvestRecord(self.farmer, self.rice, 1990, "Dry", 1.0, 100)
+
+    def test_record_registers_with_farmer(self):
+        record = HarvestRecord(self.farmer, self.rice, 2025, "dry", 1.0, 2000)
+        self.assertIn(record.record_id, self.farmer.harvests)
+        self.assertEqual(self.farmer.total_harvest_kg(), 2000)
+
+    def test_update_quantity(self):
+        record = HarvestRecord(self.farmer, self.rice, 2025, "Dry", 1.0, 1000)
+        record.update_quantity(3000)
+        self.assertEqual(record.rating(), "Excellent")
+
+    def test_from_record_class_method(self):
+        crops, farmers = {"RICE": self.rice}, {"T001": self.farmer}
+        record = HarvestRecord.from_record("T001, rice, 2025, Rainy, 2.0, 6000", farmers, crops)
+        self.assertEqual(record.yield_per_hectare(), 3.0)
+
+    def test_crop_statistics_tuple(self):
+        a = HarvestRecord(self.farmer, self.rice, 2025, "Dry", 1.0, 2000)
+        b = HarvestRecord(self.farmer, self.rice, 2025, "Rainy", 1.0, 3000)
+        records = {a.record_id: a, b.record_id: b}
+        count, total, average, best = self.rice.get_statistics(records)
+        self.assertEqual((count, total, average, best), (2, 5000, 2.5, b))
+
+    def test_top_farmer_and_delete(self):
+        other = Farmer("T002", "Sallu", "Kono")
+        good = HarvestRecord(self.farmer, self.rice, 2025, "Dry", 1.0, 3000)
+        poor = HarvestRecord(other, self.rice, 2025, "Dry", 1.0, 800)
+        farmers = {"T001": self.farmer, "T002": other}
+        records = {good.record_id: good, poor.record_id: poor}
+        self.assertIs(Farmer.find_top_farmer(farmers), self.farmer)
+        delete_farmer(farmers, records, "T002")
+        self.assertNotIn("T002", farmers)
+        self.assertNotIn(poor.record_id, records)
+
+    def test_duplicate_and_missing_ids(self):
+        farmers = {}
+        add_record(farmers, "T001", self.farmer)
+        with self.assertRaises(ValueError):
+            add_record(farmers, "T001", self.farmer)
+        with self.assertRaises(ValueError):
+            find_record(farmers, "T999", "farmer")
+
+    def test_from_string_and_catalogue(self):
+        farmer = Farmer.from_string("T003, Musa, Kailahun")
+        self.assertEqual((farmer.farmer_id, farmer.district), ("T003", "Kailahun"))
+        crop = Crop.from_catalogue(("CASS", "Cassava", 10.0))
+        self.assertEqual(crop.expected_yield, 10.0)
+
+
+if __name__ == "__main__":
+    if "--test" in sys.argv:
+        unittest.main(argv=[sys.argv[0], "-v"])
+    elif "--demo" in sys.argv:
+        run_demo()
+    else:
+        main()
